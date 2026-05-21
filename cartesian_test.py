@@ -48,7 +48,7 @@ POSE_LEFT      = [100,  100, 200, RX_DOWN, RY_DOWN, RZ_DOWN]
 POSE_RIGHT     = [100, -100, 200, RX_DOWN, RY_DOWN, RZ_DOWN]
 
 # Final park pose: arm straight up, gripper horizontal.
-PARK_JOINTS = [20, 20, 20, 20, 20, 20]
+PARK_JOINTS = [0, 0, 0, 0, 0, 0]
 
 
 def report_position(mc, label):
