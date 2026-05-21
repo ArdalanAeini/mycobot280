@@ -1,14 +1,15 @@
 """
-Replay taught pickup position with gripper rotation first.
+Top-down hardcoded cup pickup test.
 
 Sequence:
   1. Open gripper
   2. Move to HOME
-  3. Rotate gripper/wrist while still away from the cup
-  4. Move near the cup
-  5. Move into exact taught pickup pose
-  6. Close gripper
-  7. Lift cup
+  3. Move above the cup
+  4. Move vertically down to the taught pickup position
+  5. Close gripper
+  6. Lift vertically back up
+
+This avoids approaching the cup from the side.
 """
 
 import time
@@ -19,32 +20,39 @@ from pymycobot.mycobot import MyCobot
 BAUD = 1000000
 
 ARM_SPEED = 15
+DESCEND_SPEED = 8
 GRIPPER_SPEED = 50
+
+MODE = 1
 
 GRIPPER_OPEN = 100
 GRIPPER_CLOSED = 0
 
 WAIT_SEC = 4.0
+DESCEND_WAIT_SEC = 4.0
 GRIPPER_WAIT_SEC = 1.5
 
-# Your taught pickup pose from the manual teaching step
-PICK_JOINTS = [-17.84, -125.24, -0.79, 43.15, 90.08, 98.7]
-
-# Safe home pose
+# Safe home / park pose.
 HOME_JOINTS = [0, 0, 0, 0, 90, 0]
 
-# Same as HOME, but rotate J6 first to match the pickup gripper rotation.
-# This changes the gripper angle before going near the cup.
-ROTATED_HOME_JOINTS = [0, 0, 0, 0, 90, 98.7]
+# Your taught pickup position.
+# This is the exact pose where the gripper grabs the cup.
+PICK_COORDS = [223.9, -88.9, 20.1, 89.91, -1.58, 162.17]
 
-# Approach pose:
-# Same as pickup pose, but J2 is less negative, so the gripper should be higher/safer.
-# This gets close to the cup before final descent.
-APPROACH_JOINTS = [-17.84, -105.24, -0.79, 43.15, 90.08, 98.7]
+# Same X/Y/orientation as pickup, but higher Z.
+# This puts the gripper above the cup before descending vertically.
+ABOVE_CUP_Z = 100.0
+ABOVE_CUP_COORDS = [
+    PICK_COORDS[0],
+    PICK_COORDS[1],
+    ABOVE_CUP_Z,
+    PICK_COORDS[3],
+    PICK_COORDS[4],
+    PICK_COORDS[5],
+]
 
-# Final lift after grabbing.
-# Same as approach pose for now.
-LIFT_JOINTS = [-17.84, -105.24, -0.79, 43.15, 90.08, 98.7]
+# After gripping, lift straight back up.
+LIFT_COORDS = ABOVE_CUP_COORDS.copy()
 
 
 def find_robot_port():
@@ -80,10 +88,17 @@ def set_gripper(mc, value, label):
     time.sleep(GRIPPER_WAIT_SEC)
 
 
-def move_joints(mc, label, joints):
+def move_joints(mc, label, joints, speed=ARM_SPEED):
     print(f"\nMoving to {label}: {joints}")
-    mc.send_angles(joints, ARM_SPEED)
+    mc.send_angles(joints, speed)
     time.sleep(WAIT_SEC)
+    report_state(mc, f"After {label}")
+
+
+def move_coords(mc, label, coords, speed=ARM_SPEED, wait_sec=WAIT_SEC):
+    print(f"\nMoving to {label}: {coords}")
+    mc.send_coords(coords, speed, MODE)
+    time.sleep(wait_sec)
     report_state(mc, f"After {label}")
 
 
@@ -97,42 +112,39 @@ def main():
 
     report_state(mc, "Initial state")
 
-    print("\nThis script rotates the gripper first, then approaches the cup.")
+    print("\nThis script approaches the cup from above, then descends vertically.")
     print("Keep your hand near power/emergency stop.")
     input("Press ENTER to start...")
 
     # Step 1: open gripper
     set_gripper(mc, GRIPPER_OPEN, "Opening")
 
-    # Step 2: move to safe home
+    # Step 2: go home first
     move_joints(mc, "HOME_JOINTS", HOME_JOINTS)
 
-    # Step 3: rotate gripper first, while away from cup
-    move_joints(mc, "ROTATED_HOME_JOINTS", ROTATED_HOME_JOINTS)
+    # Step 3: move above cup
+    move_coords(mc, "ABOVE_CUP_COORDS", ABOVE_CUP_COORDS, ARM_SPEED, WAIT_SEC)
 
-    # Step 4: move close to the cup, but not all the way down
-    move_joints(mc, "APPROACH_JOINTS", APPROACH_JOINTS)
-
-    # Step 5: final move into exact taught pickup position
-    answer = input("\nMove into exact PICK_JOINTS position? Type yes: ").strip().lower()
+    # Step 4: descend vertically to pickup pose
+    answer = input("\nDescend vertically to cup body? Type yes: ").strip().lower()
     if answer == "yes":
-        move_joints(mc, "PICK_JOINTS", PICK_JOINTS)
+        move_coords(mc, "PICK_COORDS", PICK_COORDS, DESCEND_SPEED, DESCEND_WAIT_SEC)
     else:
-        print("Stopped before pickup position.")
+        print("Stopped above cup.")
         return
 
-    # Step 6: close gripper
-    answer = input("\nClose gripper to grab the cup? Type yes: ").strip().lower()
+    # Step 5: close gripper
+    answer = input("\nClose gripper to grab cup? Type yes: ").strip().lower()
     if answer == "yes":
         set_gripper(mc, GRIPPER_CLOSED, "Closing")
     else:
         print("Skipped gripper close.")
         return
 
-    # Step 7: lift cup
-    answer = input("\nLift the cup? Type yes: ").strip().lower()
+    # Step 6: lift straight up
+    answer = input("\nLift cup straight up? Type yes: ").strip().lower()
     if answer == "yes":
-        move_joints(mc, "LIFT_JOINTS", LIFT_JOINTS)
+        move_coords(mc, "LIFT_COORDS", LIFT_COORDS, DESCEND_SPEED, DESCEND_WAIT_SEC)
     else:
         print("Skipped lift.")
 
