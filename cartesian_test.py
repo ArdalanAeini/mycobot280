@@ -1,105 +1,129 @@
 """
-Camera test - milestone 3.
+Cartesian motion test - milestone 2 + gripper integration.
 
-Goal: prove the wrist-mounted camera works.
+Mime version of pick-and-place:
+  1. Open gripper, move to HOME_UP
+  2. Move to LEFT  (the "pick" position)
+  3. CLOSE gripper (mime grab)
+  4. Move to RIGHT (the "place" position)
+  5. OPEN gripper (mime release)
+  6. Back to HOME_UP
+  7. Park with gripper open
 
-What this does:
-  1. Try to open /dev/video0 (and fallback to /dev/video1)
-  2. Capture a single frame
-  3. Print the frame's shape and basic stats
-  4. Save it as a JPG file
+End state: arm straight up, gripper horizontal, gripper open.
 
-After running, open the saved JPG to confirm what the camera sees.
-
-Why the fallback: Jetson boards usually expose multiple /dev/video*
-nodes, even if only one camera is connected. We try them in order
-and use whichever one works.
+Gripper:
+  - Open  = value 100 (~45 mm jaw spacing)
+  - Closed = value 0   (~20 mm jaw spacing)
+  - The gripper API is independent of the arm motion - we just call
+    mc.set_gripper_value() whenever we want it to open/close.
 """
 
-import cv2
 import time
-import os
+from pymycobot.mycobot import MyCobot
 
 
-CAMERA_CANDIDATES = ["/dev/video0", "/dev/video1"]
+PORT = "/dev/ttyUSB0"
+BAUD = 1000000
 
-OUTPUT_DIR = os.path.expanduser("~/src/captures")
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "wrist_camera_test.jpg")
+SPEED = 30          # arm speed
+GRIPPER_SPEED = 50  # gripper speed
+MODE = 1
+WAIT_SEC = 5.0
+GRIPPER_WAIT_SEC = 2.0
 
-# Cameras output garbage for the first few frames as auto-exposure
-# stabilizes. We "burn" some frames before saving.
-WARMUP_FRAMES = 10
+# Gripper orientation: pointing down with preferred jaw angle.
+# Discovered via wrist_orient_test.py.
+RX_DOWN = 178.4
+RY_DOWN = -1.6
+RZ_DOWN = -133.4
+
+# Gripper values (0 = fully closed, 100 = fully open).
+GRIPPER_OPEN  = 100
+GRIPPER_CLOSED = 0
+
+# Test poses [X mm, Y mm, Z mm, RX deg, RY deg, RZ deg]
+POSE_HOME_UP   = [100,    0, 280, RX_DOWN, RY_DOWN, RZ_DOWN]
+POSE_LEFT      = [100,  100, 200, RX_DOWN, RY_DOWN, RZ_DOWN]
+POSE_RIGHT     = [100, -100, 200, RX_DOWN, RY_DOWN, RZ_DOWN]
+
+# Final park pose: arm straight up, gripper horizontal.
+PARK_JOINTS = [20, 20, 20, 20, 20, 20]
 
 
-def try_camera(device):
-    """Try to open a camera. Returns cv2.VideoCapture if it works."""
-    print(f"\nTrying {device}...")
-    cap = cv2.VideoCapture(device)
-    if not cap.isOpened():
-        print(f"  Could NOT open {device}")
-        return None
+def report_position(mc, label):
+    coords = mc.get_coords()
+    if coords is None or len(coords) == 0:
+        print(f"  >> {label}: <couldn't read coords>")
+        return
+    x, y, z, rx, ry, rz = coords
+    print(
+        f"  >> {label}: "
+        f"X={x:+7.1f}  Y={y:+7.1f}  Z={z:+7.1f}  "
+        f"RX={rx:+6.1f}  RY={ry:+6.1f}  RZ={rz:+6.1f}  (mm/deg)"
+    )
 
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        print(f"  Opened {device} but couldn't grab a frame.")
-        cap.release()
-        return None
 
-    print(f"  SUCCESS: opened {device}, frame shape: {frame.shape}")
-    return cap
+def report_gripper(mc):
+    val = mc.get_gripper_value()
+    print(f"     gripper value: {val}  (0=closed, 100=open)")
+
+
+def move_to_pose(mc, label, pose):
+    print(f"\n--- Moving to {label}: {pose} ---")
+    mc.send_coords(pose, SPEED, MODE)
+    time.sleep(WAIT_SEC)
+    report_position(mc, f"after {label}")
+    angles = mc.get_angles()
+    if angles is not None and len(angles) > 0:
+        rounded = [round(a, 1) for a in angles]
+        print(f"     joints (deg): {rounded}")
+
+
+def set_gripper(mc, value, label):
+    print(f"\n--- {label} gripper (value={value}) ---")
+    mc.set_gripper_value(value, GRIPPER_SPEED)
+    time.sleep(GRIPPER_WAIT_SEC)
+    report_gripper(mc)
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print("Connecting to arm...")
+    mc = MyCobot(PORT, BAUD)
+    time.sleep(0.5)
 
-    # Find a working camera.
-    cap = None
-    used_device = None
-    for device in CAMERA_CANDIDATES:
-        cap = try_camera(device)
-        if cap is not None:
-            used_device = device
-            break
+    print("\n[Initial state]")
+    report_position(mc, "start")
+    report_gripper(mc)
 
-    if cap is None:
-        print("\nERROR: No working camera found.")
-        print("Check: is the camera USB cable plugged in to the Jetson?")
-        print("Also try: ls /dev/video*")
-        return
+    # Step 1: Start with gripper open, move to home above the workspace.
+    set_gripper(mc, GRIPPER_OPEN, "Opening")
+    move_to_pose(mc, "HOME_UP", POSE_HOME_UP)
 
-    print(f"\nUsing camera: {used_device}")
+    # Step 2: Move to the "pick" position.
+    move_to_pose(mc, "LEFT (pick position)", POSE_LEFT)
 
-    # Warm up.
-    print(f"Warming up ({WARMUP_FRAMES} frames)...")
-    for i in range(WARMUP_FRAMES):
-        ret, _ = cap.read()
-        time.sleep(0.05)
+    # Step 3: Mime the grab.
+    set_gripper(mc, GRIPPER_CLOSED, "CLOSING (mime grab)")
 
-    # Grab the final frame.
-    print("Capturing final frame...")
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        print("ERROR: couldn't grab final frame.")
-        cap.release()
-        return
+    # Step 4: Transport to the "place" position.
+    move_to_pose(mc, "RIGHT (place position)", POSE_RIGHT)
 
-    h, w, c = frame.shape
-    avg_brightness = frame.mean()
-    print(f"\n[Captured frame]")
-    print(f"  Resolution: {w} x {h}  ({c} channels)")
-    print(f"  Average brightness: {avg_brightness:.1f}  (0=black, 255=white)")
-    if avg_brightness < 5:
-        print("  WARNING: image is nearly black. Lens cap on? Camera blocked?")
-    elif avg_brightness > 240:
-        print("  WARNING: image is nearly white. Overexposed?")
-    else:
-        print("  Brightness looks reasonable.")
+    # Step 5: Mime the release.
+    set_gripper(mc, GRIPPER_OPEN, "OPENING (mime release)")
 
-    cv2.imwrite(OUTPUT_FILE, frame)
-    print(f"\nSaved to: {OUTPUT_FILE}")
+    # Step 6: Back to home.
+    move_to_pose(mc, "HOME_UP", POSE_HOME_UP)
 
-    cap.release()
-    print("\nDone.")
+    # Step 7: Park - arm straight up, gripper horizontal, gripper open.
+    print(f"\n[Parking arm: straight up, gripper horizontal]")
+    mc.send_angles(PARK_JOINTS, SPEED)
+    time.sleep(WAIT_SEC)
+    final_angles = mc.get_angles()
+    print(f"  Final joints (deg): {[round(a, 1) for a in final_angles]}")
+    report_position(mc, "final pose")
+    report_gripper(mc)
+    print("Done.")
 
 
 if __name__ == "__main__":
