@@ -44,7 +44,7 @@ LIFT_HEIGHT_MM = 80
 #   HOME_FLIPPED    -- same as HOME but J6 rotated -180 so the gripper's
 #                      slim side faces down. This is the pose we sit in
 #                      BEFORE moving to PICK_ABOVE.
-HOME_JOINTS         = [0, 0, 0, 0, 90,    0]
+HOME_JOINTS         = [0, 0, 0, 0, 0,    0]
 HOME_FLIPPED_JOINTS = [0, 0, 0, 0, 0, +180]
 
 # Taught positions from teach_pickup_pair.py.
