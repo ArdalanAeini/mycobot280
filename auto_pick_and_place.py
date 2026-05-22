@@ -1,24 +1,24 @@
 """
-Auto pick-and-place with GRIPPER FLIP at home AND settle verification.
-
-Key fix vs previous version:
-  - move_joints_and_verify() polls /joint_states until the arm has
-    physically arrived at the target, instead of sleeping a fixed time.
-  - This solves the problem where big joint moves (like the 180-degree
-    J6 flip) didn't finish before the script moved on, leaving the arm
-    in a weird in-between pose at the end.
-
-Why the flip:
-  The gripper has a servo housing on its underside. With the gripper in
-  its natural orientation, that housing blocks reaching small/short
-  objects close to the desk. Solution: rotate J6 by -180 degrees at
-  home BEFORE approaching the cup.
+Auto pick-and-place with GRIPPER FLIP at home, settle verification,
+and configurable place offset.
 
 Strategy:
   - Joint replay for the precise grab approach (taught with the flip)
   - Cartesian motion with orientation LOCKED for lift / swing / lower
-    (keeps the gripper horizontal -- water wouldn't spill)
-  - Place position = pick position mirrored across Y axis
+    (keeps the gripper horizontal -- water in the cup wouldn't spill)
+  - Place position = pick position + configurable (X, Y) offset
+
+Why the flip:
+  The gripper has a servo housing on its underside. With the gripper in
+  its natural orientation, that housing blocks reaching small/short
+  objects close to the desk. Solution: rotate J6 by +180 degrees at
+  home BEFORE approaching the cup.
+
+Why settle verification:
+  send_angles() returns immediately; the motors physically need time.
+  A fixed sleep is unreliable for big joint moves (180-degree rotations
+  take longer than small ones). We poll get_angles() until the arm has
+  ARRIVED within JOINT_TOLERANCE_DEG of the target.
 """
 
 import time
@@ -42,13 +42,23 @@ JOINT_TOLERANCE_DEG = 3.0
 SETTLE_TIMEOUT_SEC = 12.0
 POLL_INTERVAL_SEC = 0.2
 
-# Cartesian motion settle is harder to verify (no precise position
-# feedback in the same way), so we use a generous fixed sleep here.
+# Cartesian motion settle is harder to verify, so we use a fixed sleep.
 CARTESIAN_WAIT_SEC = 5.0
-CARTESIAN_MODE = 1
+CARTESIAN_MODE = 1   # 1 = linear (straight-line in 3D space)
 
 # How much to lift the cup vertically (mm).
 LIFT_HEIGHT_MM = 80
+
+# Place offset: where the cup ends up, relative to the pick position.
+# Adjust these to choose where the cup gets placed.
+#   +X = forward (away from operator), -X = backward (toward operator)
+#   +Y = arm's left, -Y = arm's right
+# Example values:
+#   (0, 150)  -> cup moves 150 mm to the left
+#   (100, 0)  -> cup moves 100 mm forward
+#   (50, 100) -> cup moves 50 mm forward and 100 mm to the left
+PLACE_OFFSET_X_MM = 0
+PLACE_OFFSET_Y_MM = 150
 
 # Home poses.
 HOME_JOINTS         = [0, 0, 0, 0, 0,    0]
@@ -90,11 +100,8 @@ def set_gripper(mc, value, label):
 def move_joints_and_verify(mc, label, target):
     """
     Send a joint command and POLL until the arm has physically arrived,
-    OR a timeout fires.
-
-    This replaces the old time.sleep(WAIT_SEC) approach, which assumed
-    every move took the same amount of time. Big moves (like a 180-deg
-    rotation) need longer than small moves.
+    OR a timeout fires. Solves the problem where fixed sleeps weren't
+    enough for big joint moves like the 180-degree gripper flip.
     """
     print(f"\nMoving (joint) to {label}: {target}")
     mc.send_angles(target, ARM_SPEED)
@@ -106,7 +113,6 @@ def move_joints_and_verify(mc, label, target):
         actual = mc.get_angles()
         if actual is None or len(actual) == 0:
             continue
-        # Compute the worst per-joint error.
         per_joint_err = [abs(a - t) for a, t in zip(actual, target)]
         last_err = max(per_joint_err)
         if last_err < JOINT_TOLERANCE_DEG:
@@ -139,15 +145,20 @@ def main():
     report_state(mc, "Initial state")
 
     # Compute derived Cartesian waypoints.
+    # Pick lift: same XY as PICK_GRAB, Z raised so the cup clears the table.
     pick_lift_coords = list(PICK_GRAB_COORDS)
     pick_lift_coords[2] += LIFT_HEIGHT_MM
 
-    place_lift_coords = list(pick_lift_coords)
-    place_lift_coords[1] = -place_lift_coords[1]
-
+    # Place grab: PICK_GRAB shifted by configurable X and Y offsets.
     place_grab_coords = list(PICK_GRAB_COORDS)
-    place_grab_coords[1] = -place_grab_coords[1]
+    place_grab_coords[0] += PLACE_OFFSET_X_MM
+    place_grab_coords[1] += PLACE_OFFSET_Y_MM
 
+    # Place lift: place_grab with Z raised, so we can swing safely.
+    place_lift_coords = list(place_grab_coords)
+    place_lift_coords[2] += LIFT_HEIGHT_MM
+
+    # Place release-and-back-away: same as place_grab but Z lifted.
     place_release_coords = list(place_grab_coords)
     place_release_coords[2] += LIFT_HEIGHT_MM
 
@@ -168,7 +179,7 @@ def main():
     # 2. Go HOME (natural orientation)
     move_joints_and_verify(mc, "HOME", HOME_JOINTS)
 
-    # 3. Flip gripper -180 degrees
+    # 3. Flip gripper +180 degrees so the slim side faces down
     move_joints_and_verify(mc, "HOME_FLIPPED", HOME_FLIPPED_JOINTS)
 
     # 4. Approach the cup
@@ -183,7 +194,7 @@ def main():
     # 7. Lift vertically (Cartesian, orientation locked)
     move_cartesian(mc, "PICK_LIFT (vertical up)", pick_lift_coords)
 
-    # 8. Swing across (Cartesian, orientation locked)
+    # 8. Swing horizontally to (X+offset_x, Y+offset_y) (Cartesian, orientation locked)
     move_cartesian(mc, "PLACE_LIFT (horizontal swing)", place_lift_coords)
 
     # 9. Lower (Cartesian, orientation locked)
