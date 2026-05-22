@@ -1,20 +1,21 @@
 """
-Auto pick-and-place using TAUGHT pickup positions and CARTESIAN lift.
+Auto pick-and-place with GRIPPER FLIP at home.
+
+Why the flip:
+  The gripper has a servo housing on its underside. With the gripper in
+  its "natural" orientation, that housing blocks the gripper from
+  reaching small/short objects close to the desk surface.
+  Solution: rotate J6 by -180 degrees at home BEFORE approaching the cup.
+  Now the slim side is down and the gripper can reach small objects.
 
 Strategy:
-  - Pick approach + grab: replay taught JOINT positions (most reliable)
-  - Lift, swing, lower: Cartesian motion with orientation LOCKED
+  - Joint replay for the precise grab approach (taught with the flip)
+  - Cartesian motion with orientation LOCKED for lift / swing / lower
     (keeps the gripper horizontal -- water in the cup wouldn't spill)
-  - Release + back-away: Cartesian motion
+  - Place position = pick position mirrored across Y axis
 
-Place position = pick position mirrored across Y axis (left-right swap).
-
-Why hybrid joint/Cartesian:
-  - Joint replay gets us exactly into the taught grab pose with the
-    arm in the configuration we tested.
-  - After grabbing, we want SMOOTH horizontal moves with the gripper
-    staying level. Cartesian mode = 1 does that for us by letting the
-    firmware coordinate all joints simultaneously.
+The flip + un-flip wraps around the approach so the arm returns to its
+natural home pose at the end.
 """
 
 import time
@@ -38,15 +39,21 @@ CARTESIAN_MODE = 1
 # How much to lift the cup vertically (mm). 80 mm clears most desk objects.
 LIFT_HEIGHT_MM = 80
 
-# Home pose (joint space). Arm straight up, gripper horizontal.
-HOME_JOINTS = [0, 0, 0, 0, 90, 0]
+# Home poses.
+#   HOME            -- arm straight up, gripper in its natural orientation.
+#   HOME_FLIPPED    -- same as HOME but J6 rotated -180 so the gripper's
+#                      slim side faces down. This is the pose we sit in
+#                      BEFORE moving to PICK_ABOVE.
+HOME_JOINTS         = [0, 0, 0, 0, 90,    0]
+HOME_FLIPPED_JOINTS = [0, 0, 0, 0, 90, -180]
 
 # Taught positions from teach_pickup_pair.py.
-# JOINTS are used for the precise approach + grab.
-# COORDS are used as the starting point for Cartesian lift calculations.
+# These were taught with the gripper already in the FLIPPED orientation.
 PICK_ABOVE_JOINTS = [-21.09, -97.20, -0.79, -88.41, 105.90, -10.10]
 PICK_GRAB_JOINTS  = [-15.02, -97.29, -0.79, -84.46, 109.59,  -5.00]
 
+# Cartesian coords for PICK_GRAB. Used as the starting point for the
+# Cartesian lift / swing / lower calculations.
 PICK_GRAB_COORDS = [205.2, -74.5, 29.8, 90.85, 2.60, 145.42]
 
 
@@ -99,27 +106,27 @@ def main():
 
     report_state(mc, "Initial state")
 
-    # Compute derived positions in Cartesian space.
-    # Lift: same XY and orientation as PICK_GRAB, but Z lifted.
+    # Compute derived Cartesian waypoints.
+    # Lift = same XY and orientation as PICK_GRAB, Z raised by LIFT_HEIGHT_MM
     pick_lift_coords = list(PICK_GRAB_COORDS)
     pick_lift_coords[2] += LIFT_HEIGHT_MM
 
-    # Place lift: same as pick lift but Y mirrored (left-right swap).
+    # Place lift = pick lift mirrored across Y (left-right swap)
     place_lift_coords = list(pick_lift_coords)
     place_lift_coords[1] = -place_lift_coords[1]
 
-    # Place grab: mirror Y of PICK_GRAB_COORDS.
+    # Place grab = mirror Y of PICK_GRAB_COORDS
     place_grab_coords = list(PICK_GRAB_COORDS)
     place_grab_coords[1] = -place_grab_coords[1]
 
-    # Place release-and-back-away: same as place grab but Z lifted.
+    # Place release-and-back-away = place grab with Z lifted
     place_release_coords = list(place_grab_coords)
     place_release_coords[2] += LIFT_HEIGHT_MM
 
     print("\nComputed Cartesian waypoints:")
-    print(f"  PICK_LIFT:    {[round(c, 1) for c in pick_lift_coords]}")
-    print(f"  PLACE_LIFT:   {[round(c, 1) for c in place_lift_coords]}")
-    print(f"  PLACE_GRAB:   {[round(c, 1) for c in place_grab_coords]}")
+    print(f"  PICK_LIFT:     {[round(c, 1) for c in pick_lift_coords]}")
+    print(f"  PLACE_LIFT:    {[round(c, 1) for c in place_lift_coords]}")
+    print(f"  PLACE_GRAB:    {[round(c, 1) for c in place_grab_coords]}")
     print(f"  PLACE_RELEASE: {[round(c, 1) for c in place_release_coords]}")
 
     print("\nKeep your hand near power/E-stop.")
@@ -130,35 +137,42 @@ def main():
     # 1. Open gripper
     set_gripper(mc, GRIPPER_OPEN, "Opening")
 
-    # 2. Go HOME for a known starting pose
+    # 2. Go HOME (natural orientation)
     move_joints(mc, "HOME", HOME_JOINTS)
 
-    # 3. Move to taught approach position (joints, for reliability)
+    # 3. Flip the gripper 180 degrees so the slim side faces down.
+    #    This gives clearance to reach the small cup on the desk.
+    move_joints(mc, "HOME_FLIPPED (J6 = -180)", HOME_FLIPPED_JOINTS)
+
+    # 4. Move to the taught approach position
     move_joints(mc, "PICK_ABOVE", PICK_ABOVE_JOINTS)
 
-    # 4. Sweep into the taught grab position (joints)
+    # 5. Sweep into the taught grab position
     move_joints(mc, "PICK_GRAB", PICK_GRAB_JOINTS)
 
-    # 5. Close gripper around the cup
+    # 6. Close gripper around the cup
     set_gripper(mc, GRIPPER_CLOSED, "Closing")
 
-    # 6. LIFT vertically -- Cartesian with orientation locked
-    #    The gripper stays horizontal; water in the cup wouldn't spill.
+    # 7. LIFT vertically. Orientation LOCKED -> gripper stays horizontal,
+    #    water in the cup wouldn't spill.
     move_cartesian(mc, "PICK_LIFT (vertical up)", pick_lift_coords)
 
-    # 7. SWING horizontally to mirror Y -- Cartesian, orientation locked
+    # 8. SWING horizontally to mirror Y. Orientation locked.
     move_cartesian(mc, "PLACE_LIFT (horizontal swing)", place_lift_coords)
 
-    # 8. LOWER vertically to place position -- Cartesian, orientation locked
+    # 9. LOWER vertically. Orientation locked.
     move_cartesian(mc, "PLACE_GRAB (vertical down)", place_grab_coords)
 
-    # 9. Release the cup
+    # 10. Release the cup
     set_gripper(mc, GRIPPER_OPEN, "Opening / releasing")
 
-    # 10. Lift away from the placed cup -- Cartesian, orientation locked
+    # 11. Lift away from the placed cup. Orientation locked.
     move_cartesian(mc, "PLACE_RELEASE (vertical up)", place_release_coords)
 
-    # 11. Return HOME
+    # 12. Un-flip the gripper before going home (J6 back to 0).
+    move_joints(mc, "HOME_FLIPPED (return through flipped pose)", HOME_FLIPPED_JOINTS)
+
+    # 13. Return HOME (natural orientation)
     move_joints(mc, "HOME", HOME_JOINTS)
 
     print("\n" + "=" * 50)
