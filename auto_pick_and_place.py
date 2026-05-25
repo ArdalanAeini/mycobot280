@@ -43,7 +43,7 @@ SETTLE_TIMEOUT_SEC = 12.0
 POLL_INTERVAL_SEC = 0.2
 
 # Cartesian motion settle is harder to verify, so we use a fixed sleep.
-CARTESIAN_WAIT_SEC = 5.0
+CARTESIAN_WAIT_SEC = 3
 CARTESIAN_MODE = 1   # 1 = linear (straight-line in 3D space)
 
 # How much to lift the cup vertically (mm).
