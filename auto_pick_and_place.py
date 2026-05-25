@@ -42,8 +42,10 @@ JOINT_TOLERANCE_DEG = 3.0
 SETTLE_TIMEOUT_SEC = 12.0
 POLL_INTERVAL_SEC = 0.2
 
-# Cartesian motion settle is harder to verify, so we use a fixed sleep.
-CARTESIAN_WAIT_SEC = 3
+# Cartesian: send_coords() returns immediately even if IK failed (silent).
+# Poll get_coords() until XYZ is within tolerance or timeout.
+COORD_TOLERANCE_MM = 15.0
+CARTESIAN_SETTLE_TIMEOUT_SEC = 15.0
 CARTESIAN_MODE = 1   # 1 = linear (straight-line in 3D space)
 
 # How much to lift the cup vertically (mm).
@@ -54,12 +56,12 @@ LIFT_HEIGHT_MM = 80
 #   +X = forward (away from operator), -X = backward (toward operator)
 #   +Y = arm's left, -Y = arm's right
 # Example values:
-#   (0, 150)   -> cup moves 150 mm to the left
-#   (0, -150)  -> cup moves 150 mm to the right (opposite side of pick)
-#   (100, 0)   -> cup moves 100 mm forward
-#   (50, 100)  -> cup moves 50 mm forward and 100 mm to the left
-PLACE_OFFSET_X_MM = 0
-PLACE_OFFSET_Y_MM = -150
+#   (0, 150)    -> 150 mm left  (known good on this setup)
+#   (0, -150)   -> 150 mm right — often OUT OF REACH at pick orientation; arm won't move
+#   (-150, 0)   -> 150 mm toward operator (other side of table along X)
+#   (150, 0)    -> 150 mm away from operator
+PLACE_OFFSET_X_MM = -150
+PLACE_OFFSET_Y_MM = 0
 
 # Home poses.
 HOME_JOINTS         = [0, 0, 0, 0, 0,    0]
@@ -129,11 +131,34 @@ def move_joints_and_verify(mc, label, target):
     return False
 
 
-def move_cartesian(mc, label, coords):
-    print(f"\nMoving (Cartesian) to {label}: {coords}")
-    mc.send_coords(coords, ARM_SPEED, CARTESIAN_MODE)
-    time.sleep(CARTESIAN_WAIT_SEC)
-    report_state(mc, f"After {label}")
+def move_cartesian_and_verify(mc, label, target):
+    """
+    Send Cartesian target and poll until XYZ matches within tolerance.
+    pymycobot does not raise if IK fails — without this, the script would
+    keep going and release the cup without ever swinging to the place pose.
+    """
+    print(f"\nMoving (Cartesian) to {label}: {target}")
+    mc.send_coords(target, ARM_SPEED, CARTESIAN_MODE)
+
+    deadline = time.time() + CARTESIAN_SETTLE_TIMEOUT_SEC
+    last_err = float("inf")
+    while time.time() < deadline:
+        time.sleep(POLL_INTERVAL_SEC)
+        actual = mc.get_coords()
+        if actual is None or len(actual) < 3:
+            continue
+        pos_err = max(abs(a - t) for a, t in zip(actual[:3], target[:3]))
+        last_err = pos_err
+        if pos_err < COORD_TOLERANCE_MM:
+            elapsed = CARTESIAN_SETTLE_TIMEOUT_SEC - (deadline - time.time())
+            print(f"  SETTLED at {label} after {elapsed:.1f}s, max XYZ err {last_err:.1f} mm")
+            report_state(mc, f"After {label}")
+            return True
+
+    print(f"  FAILED at {label} after {CARTESIAN_SETTLE_TIMEOUT_SEC}s — "
+          f"max XYZ err {last_err:.1f} mm (target likely unreachable)")
+    report_state(mc, f"After {label} (FAILED)")
+    return False
 
 
 def main():
@@ -193,19 +218,28 @@ def main():
     set_gripper(mc, GRIPPER_CLOSED, "Closing")
 
     # 7. Lift vertically (Cartesian, orientation locked)
-    move_cartesian(mc, "PICK_LIFT (vertical up)", pick_lift_coords)
+    if not move_cartesian_and_verify(mc, "PICK_LIFT (vertical up)", pick_lift_coords):
+        print("\nABORT: pick lift failed. Cup still in gripper — adjust pose or offsets.")
+        return
 
     # 8. Swing horizontally to (X+offset_x, Y+offset_y) (Cartesian, orientation locked)
-    move_cartesian(mc, "PLACE_LIFT (horizontal swing)", place_lift_coords)
+    if not move_cartesian_and_verify(mc, "PLACE_LIFT (horizontal swing)", place_lift_coords):
+        print("\nABORT: place swing failed (often out of reach). Cup still in gripper.")
+        print(f"  Tried place at X+{PLACE_OFFSET_X_MM}, Y+{PLACE_OFFSET_Y_MM} mm from pick.")
+        print("  Try smaller offsets, or (0, 150) for left side, or (-120, 0) toward you.")
+        return
 
     # 9. Lower (Cartesian, orientation locked)
-    move_cartesian(mc, "PLACE_GRAB (vertical down)", place_grab_coords)
+    if not move_cartesian_and_verify(mc, "PLACE_GRAB (vertical down)", place_grab_coords):
+        print("\nABORT: place lower failed. Cup still in gripper.")
+        return
 
     # 10. Release
     set_gripper(mc, GRIPPER_OPEN, "Opening / releasing")
 
     # 11. Lift away (Cartesian, orientation locked)
-    move_cartesian(mc, "PLACE_RELEASE (vertical up)", place_release_coords)
+    if not move_cartesian_and_verify(mc, "PLACE_RELEASE (vertical up)", place_release_coords):
+        print("\nWARNING: release lift failed; continuing to joint homing.")
 
     # 12. Un-flip before going home
     move_joints_and_verify(mc, "HOME_FLIPPED (return through flipped pose)",
