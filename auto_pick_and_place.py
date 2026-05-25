@@ -60,8 +60,8 @@ LIFT_HEIGHT_MM = 80
 #   (0, -150)   -> 150 mm right — often OUT OF REACH at pick orientation; arm won't move
 #   (-150, 0)   -> 150 mm toward operator (other side of table along X)
 #   (150, 0)    -> 150 mm away from operator
-PLACE_OFFSET_X_MM = -100
-PLACE_OFFSET_Y_MM = 0
+PLACE_OFFSET_X_MM = 0
+PLACE_OFFSET_Y_MM = 150
 
 # Home poses.
 HOME_JOINTS         = [0, 0, 0, 0, 0,    0]
