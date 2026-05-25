@@ -54,11 +54,12 @@ LIFT_HEIGHT_MM = 80
 #   +X = forward (away from operator), -X = backward (toward operator)
 #   +Y = arm's left, -Y = arm's right
 # Example values:
-#   (0, 150)  -> cup moves 150 mm to the left
-#   (100, 0)  -> cup moves 100 mm forward
-#   (50, 100) -> cup moves 50 mm forward and 100 mm to the left
+#   (0, 150)   -> cup moves 150 mm to the left
+#   (0, -150)  -> cup moves 150 mm to the right (opposite side of pick)
+#   (100, 0)   -> cup moves 100 mm forward
+#   (50, 100)  -> cup moves 50 mm forward and 100 mm to the left
 PLACE_OFFSET_X_MM = 0
-PLACE_OFFSET_Y_MM = 150
+PLACE_OFFSET_Y_MM = -150
 
 # Home poses.
 HOME_JOINTS         = [0, 0, 0, 0, 0,    0]
