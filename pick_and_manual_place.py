@@ -9,7 +9,7 @@ Controls (myCobot frame: +X forward, +Y arm's left, +Z up):
   HOLD arrow keys   -> move continuously in X / Y (release to stop)
   HOLD u / j        -> move continuously in Z
   w/a/s/d           -> same as arrows (hold for continuous move)
-  [ / ]             -> smaller / larger step per nudge
+  [ / ]             -> slower / faster jog speed
   ENTER             -> place cup here (lower, open gripper, lift, home)
   q                 -> quit jog mode (cup still held; you handle recovery)
 
@@ -27,7 +27,6 @@ from pymycobot.mycobot import MyCobot
 
 BAUD = 1000000
 ARM_SPEED = 25
-JOG_SPEED = 35
 GRIPPER_SPEED = 50
 GRIPPER_OPEN = 100
 GRIPPER_CLOSED = 0
@@ -42,16 +41,18 @@ CARTESIAN_SETTLE_TIMEOUT_SEC = 15.0
 CARTESIAN_MODE = 1
 
 LIFT_HEIGHT_MM = 80
-JOG_STEP_MM = 10
-JOG_STEP_MIN_MM = 2
-JOG_STEP_MAX_MM = 40
 
-# Hold-to-move timing (tune if motion feels too fast/slow).
-JOG_REPEAT_INTERVAL_SEC = 0.35   # send next nudge while key held
-JOG_RELEASE_TIMEOUT_SEC = 0.18   # stop if no move key seen for this long
-JOG_NUDGE_WAIT_SEC = 0.45        # wait after each nudge before reading pose
-JOG_BLOCKED_MM = 22.0            # if XYZ err larger, IK likely failed
-KEY_POLL_MS = 50                 # terminal poll interval
+# Hold-to-move: velocity stream (no stop-start between steps).
+JOG_VELOCITY_MM_S = 35           # how fast target moves while key held
+JOG_VELOCITY_MIN = 10
+JOG_VELOCITY_MAX = 70
+JOG_STREAM_SPEED = 50            # send_coords speed (firmware units)
+JOG_COMMAND_INTERVAL_SEC = 0.08  # command rate ~12 Hz (overlap motion)
+JOG_SYNC_INTERVAL_SEC = 0.20     # read actual pose for display / stuck check
+JOG_RELEASE_TIMEOUT_SEC = 0.30   # stop after no key event (SSH repeat varies)
+JOG_STUCK_TIME_SEC = 0.7         # no motion this long -> out of reach
+JOG_STUCK_MOVE_MM = 3.0          # min axis travel per sync to count as moving
+KEY_POLL_MS = 30
 
 HOME_JOINTS = [0, 0, 0, 0, 0, 0]
 HOME_FLIPPED_JOINTS = [0, 0, 0, 0, 0, +180]
@@ -144,28 +145,8 @@ def lock_orientation(target, ref):
     return target
 
 
-def jog_nudge(mc, coords, axis, sign, step_mm, ref_orientation):
-    """
-    One small Cartesian step for hold-to-move. Uses a short wait instead of
-    long settle polling so repeated nudges feel continuous while a key is held.
-    """
-    target = list(coords)
-    target[axis] += sign * step_mm
-    lock_orientation(target, ref_orientation)
-
-    mc.send_coords(target, JOG_SPEED, CARTESIAN_MODE)
-    time.sleep(JOG_NUDGE_WAIT_SEC)
-
-    actual = read_coords(mc)
-    if actual is None:
-        return False, coords, "no coords"
-
-    lock_orientation(actual, ref_orientation)
-    err = max(abs(a - t) for a, t in zip(actual[:3], target[:3]))
-    if err > JOG_BLOCKED_MM:
-        return False, actual, "blocked"
-
-    return True, actual, "ok"
+def send_jog_command(mc, commanded):
+    mc.send_coords(commanded, JOG_STREAM_SPEED, CARTESIAN_MODE)
 
 
 # (axis, sign, label) for held keys — axis 0=X, 1=Y, 2=Z
@@ -183,26 +164,26 @@ MOVE_KEY_MAP = {
 }
 
 
-def draw_screen(stdscr, coords, step_mm, last_msg, held=None):
+def draw_screen(stdscr, actual, commanded, velocity, last_msg, held=None):
     stdscr.clear()
     h, w = stdscr.getmaxyx()
     lines = [
         "MANUAL PLACE MODE — cup is in the gripper",
         "",
-        f"  X = {coords[0]:7.1f} mm   (+X = forward, away from you)",
-        f"  Y = {coords[1]:7.1f} mm   (+Y = arm's left)",
-        f"  Z = {coords[2]:7.1f} mm",
-        f"  RX/RY/RZ locked for level carry",
+        f"  X = {actual[0]:7.1f} mm   target {commanded[0]:7.1f}",
+        f"  Y = {actual[1]:7.1f} mm   target {commanded[1]:7.1f}",
+        f"  Z = {actual[2]:7.1f} mm   target {commanded[2]:7.1f}",
+        f"  (+X forward, +Y arm left)  RX/RY/RZ locked",
         "",
-        f"  Step size: {step_mm} mm per nudge  ( [ smaller , ] larger )",
+        f"  Jog speed: {velocity:.0f} mm/s   ( [ slower , ] faster )",
         "",
-        "  HOLD arrows / w/a/s/d  -> move X / Y continuously",
-        "  HOLD u / j             -> Z up / down continuously",
-        "  ENTER       -> place cup here",
+        "  HOLD arrows / w/a/s/d  -> smooth X / Y",
+        "  HOLD u / j             -> smooth Z",
+        "  ENTER       -> place at target",
         "  q           -> quit (cup still held)",
         "",
         f"  Moving: {held[2] if held else '—'}",
-        f"  Last: {last_msg}",
+        f"  {last_msg}",
     ]
     for i, line in enumerate(lines):
         if i >= h - 1:
@@ -218,67 +199,104 @@ def manual_jog_loop(mc, ref_orientation):
         return None
 
     lock_orientation(coords, ref_orientation)
-    step_mm = JOG_STEP_MM
-    last_msg = "ready"
+    commanded = list(coords)
+    actual = list(coords)
+    velocity = float(JOG_VELOCITY_MM_S)
+    last_msg = "HOLD arrow key to move"
 
     def _run(stdscr):
-        nonlocal coords, step_mm, last_msg
+        nonlocal commanded, actual, velocity, last_msg
         curses.curs_set(0)
         stdscr.keypad(True)
         stdscr.timeout(KEY_POLL_MS)
 
         held = None
         last_input_time = 0.0
-        last_jog_time = 0.0
+        last_loop_time = time.time()
+        last_send_time = 0.0
+        last_sync_time = 0.0
+        stuck_time = 0.0
+        prev_axis_pos = actual[0]
 
         while True:
             now = time.time()
-            draw_screen(stdscr, coords, step_mm, last_msg, held)
+            dt = now - last_loop_time
+            last_loop_time = now
+            if dt <= 0:
+                dt = KEY_POLL_MS / 1000.0
 
-            # Read every pending key (terminal may repeat while held).
+            draw_screen(stdscr, actual, commanded, velocity, last_msg, held)
+
             while True:
                 key = stdscr.getch()
                 if key == -1:
                     break
 
                 if key in MOVE_KEY_MAP:
+                    if held is None:
+                        snap = read_coords(mc)
+                        if snap is not None:
+                            actual = snap
+                            commanded = list(snap)
+                            lock_orientation(commanded, ref_orientation)
+                            lock_orientation(actual, ref_orientation)
                     held = MOVE_KEY_MAP[key]
                     last_input_time = now
+                    stuck_time = 0.0
+                    prev_axis_pos = actual[held[0]]
+                    last_msg = f"moving {held[2]}..."
                 elif key == ord("["):
-                    step_mm = max(JOG_STEP_MIN_MM, step_mm - 2)
-                    last_msg = f"step -> {step_mm} mm"
+                    velocity = max(JOG_VELOCITY_MIN, velocity - 5)
+                    last_msg = f"speed {velocity:.0f} mm/s"
                 elif key == ord("]"):
-                    step_mm = min(JOG_STEP_MAX_MM, step_mm + 2)
-                    last_msg = f"step -> {step_mm} mm"
+                    velocity = min(JOG_VELOCITY_MAX, velocity + 5)
+                    last_msg = f"speed {velocity:.0f} mm/s"
                 elif key in (10, 13, curses.KEY_ENTER):
-                    lock_orientation(coords, ref_orientation)
-                    return coords
+                    lock_orientation(commanded, ref_orientation)
+                    return list(commanded)
                 elif key in (ord("q"), ord("Q"), 27):
                     return None
 
             if held is not None and (now - last_input_time) > JOG_RELEASE_TIMEOUT_SEC:
                 held = None
-                last_msg = "stopped (key released)"
+                snap = read_coords(mc)
+                if snap is not None:
+                    actual = snap
+                    commanded = list(snap)
+                    lock_orientation(commanded, ref_orientation)
+                    lock_orientation(actual, ref_orientation)
+                last_msg = "stopped"
 
-            if held is not None and (now - last_jog_time) >= JOG_REPEAT_INTERVAL_SEC:
+            if held is not None:
                 axis, sign, label = held
-                ok, actual, status = jog_nudge(
-                    mc, coords, axis, sign, step_mm, ref_orientation
-                )
-                last_jog_time = now
-                if actual is not None:
-                    coords = actual
-                if ok:
-                    last_msg = f"moving {label} {step_mm}mm"
-                else:
-                    held = None
-                    if status == "blocked":
-                        last_msg = f"BLOCKED {label} — out of reach"
-                    else:
-                        last_msg = f"BLOCKED {label}"
+                commanded[axis] += sign * velocity * dt
+                lock_orientation(commanded, ref_orientation)
+
+                if now - last_send_time >= JOG_COMMAND_INTERVAL_SEC:
+                    send_jog_command(mc, commanded)
+                    last_send_time = now
+
+            if now - last_sync_time >= JOG_SYNC_INTERVAL_SEC:
+                snap = read_coords(mc)
+                if snap is not None:
+                    actual = snap
+                    lock_orientation(actual, ref_orientation)
+                    if held is not None:
+                        axis, sign, label = held
+                        moved = abs(actual[axis] - prev_axis_pos)
+                        if moved < JOG_STUCK_MOVE_MM:
+                            stuck_time += JOG_SYNC_INTERVAL_SEC
+                        else:
+                            stuck_time = 0.0
+                        prev_axis_pos = actual[axis]
+                        if stuck_time >= JOG_STUCK_TIME_SEC:
+                            held = None
+                            commanded = list(actual)
+                            last_msg = f"BLOCKED {label} — out of reach"
+                last_sync_time = now
 
     print("\n" + "=" * 50)
-    print("Manual jog — HOLD arrow keys for continuous motion.")
+    print("Manual jog — HOLD arrow keys (smooth velocity mode).")
     print("Click this terminal window so key presses go to SSH.")
     print("=" * 50)
     return curses.wrapper(_run)
