@@ -17,7 +17,7 @@ Why the flip:
 Why settle verification:
   send_angles() returns immediately; the motors physically need time.
   A fixed sleep is unreliable for big joint moves (180-degree rotations
-  take longer than small ones). We poll get_angles() until the arm has
+  take longer than small ones). We poll gset_angles() until the arm has
   ARRIVED within JOINT_TOLERANCE_DEG of the target.
 """
 
@@ -60,7 +60,7 @@ LIFT_HEIGHT_MM = 80
 #   (0, -150)   -> 150 mm right — often OUT OF REACH at pick orientation; arm won't move
 #   (-150, 0)   -> 150 mm toward operator (other side of table along X)
 #   (150, 0)    -> 150 mm away from operator
-PLACE_OFFSET_X_MM = -150
+PLACE_OFFSET_X_MM = -100
 PLACE_OFFSET_Y_MM = 0
 
 # Home poses.
